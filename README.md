@@ -1167,7 +1167,26 @@ spec:
     errorDocument: error.html
 ```
 
-The site is served at `my-site.web.garage.example.com:3902`. Point DNS (wildcard CNAME or per-bucket) at the Garage service, and optionally front it with an ingress or HTTPRoute.
+The site is served at `my-site.web.garage.example.com:3902`. Point DNS (wildcard CNAME or per-bucket) at the Garage service, and optionally front it with an ingress or HTTPRoute — or let the operator manage one with `spec.websiteExposure`:
+
+```yaml
+spec:
+  website:
+    enabled: true
+    indexDocument: index.html
+  websiteExposure:
+    # hostnames: [my-site.web.garage.example.com]  # default: <globalAlias><rootDomain>
+    # exactly one of ingress / gateway
+    ingress:
+      ingressClassName: traefik
+      tlsSecretName: my-site-tls
+    # gateway:
+    #   parentRefs:
+    #     - name: public-gateway
+    #       sectionName: http
+```
+
+This creates an `Ingress` or `HTTPRoute` (named `<bucket>-website` in the **bucket's** namespace, controller-owned by the bucket) that routes `<bucket>.<root-domain>` — or the hostnames you list — to the cluster's web API Service (`<cluster>-gateway` for unified clusters, or an explicit `websiteExposure.backendRef` override). An `HTTPRoute` accepts any listed hostname (non-canonical ones get a `URLRewrite` back to the canonical host); an `Ingress` only accepts the canonical hostname or the global alias, because it cannot rewrite the Host header. Ingress exposure only works when the bucket and the cluster share a namespace; an `HTTPRoute` can cross namespaces through a Gateway API `ReferenceGrant` in the cluster's namespace (and needs the operator started with `--enable-gateway-api` plus the Gateway API CRDs). The `WebsiteExposed` condition and `status.websiteExposure` report the result.
 
 Once website hosting is enabled and the bucket has a global alias, the operator populates `status.websiteUrl`:
 

@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	v1beta2 "github.com/rajsinghtech/garage-operator/api/v1beta2"
 	"github.com/rajsinghtech/garage-operator/internal/storagecontract"
@@ -1207,6 +1208,134 @@ func TestValidateGarageBucketSpecNormalizesKeyRefNamespaceForDuplicates(t *testi
 	}
 	if err := ValidateGarageBucketSpec(bucket); err == nil || !strings.Contains(err.Error(), "duplicate keyRef") {
 		t.Fatalf("empty and explicit object namespace were not treated as the same keyRef: %v", err)
+	}
+}
+
+func TestValidateGarageBucketSpecWebsiteExposure(t *testing.T) {
+	enabled := true
+	newBucket := func(website *WebsiteConfig, config *WebsiteExposureConfig) *GarageBucket {
+		bucket := &GarageBucket{
+			ObjectMeta: metav1.ObjectMeta{Name: testBucket, Namespace: testSourceNS},
+			Spec: GarageBucketSpec{
+				ClusterRef: ClusterReference{Name: testCluster},
+				Website:    website,
+			},
+		}
+		bucket.Spec.WebsiteExposure = config
+		return bucket
+	}
+	refs := func(name string) []gatewayv1.ParentReference {
+		return []gatewayv1.ParentReference{{Name: gatewayv1.ObjectName(name)}}
+	}
+	cases := []struct {
+		name    string
+		website *WebsiteConfig
+		config  *WebsiteExposureConfig
+		wantErr string
+	}{
+		{name: "nil is valid", website: &WebsiteConfig{Enabled: &enabled}, config: nil},
+		{
+			name:    "exposure without website enabled",
+			website: &WebsiteConfig{},
+			config: &WebsiteExposureConfig{
+				Ingress: &WebsiteExposureIngressConfig{},
+			},
+			wantErr: "requires spec.website.enabled",
+		},
+		{
+			name:    "both ingress and gateway",
+			website: &WebsiteConfig{Enabled: &enabled},
+			config: &WebsiteExposureConfig{
+				Ingress: &WebsiteExposureIngressConfig{},
+				Gateway: &WebsiteExposureGatewayConfig{ParentRefs: refs("gw")},
+			},
+			wantErr: "mutually exclusive",
+		},
+		{
+			name:    "neither ingress nor gateway",
+			website: &WebsiteConfig{Enabled: &enabled},
+			config:  &WebsiteExposureConfig{},
+			wantErr: "at least one",
+		},
+		{
+			name:    "duplicate hostnames rejected",
+			website: &WebsiteConfig{Enabled: &enabled},
+			config: &WebsiteExposureConfig{
+				Hostnames: []string{"site.example.com", "site.example.com"},
+				Gateway:   &WebsiteExposureGatewayConfig{ParentRefs: refs("gw")},
+			},
+			wantErr: "duplicate",
+		},
+		{
+			name:    "gateway parentRef without name",
+			website: &WebsiteConfig{Enabled: &enabled},
+			config: &WebsiteExposureConfig{
+				Gateway: &WebsiteExposureGatewayConfig{
+					ParentRefs: []gatewayv1.ParentReference{{}},
+				},
+			},
+			wantErr: "parentRefs[0].name is required",
+		},
+		{
+			name:    "ingress valid",
+			website: &WebsiteConfig{Enabled: &enabled},
+			config: &WebsiteExposureConfig{
+				Hostnames: []string{"site.example.com"},
+				Ingress:   &WebsiteExposureIngressConfig{IngressClassName: "traefik"},
+			},
+		},
+		{
+			name:    "ingress cross-namespace is rejected",
+			website: &WebsiteConfig{Enabled: &enabled},
+			config: &WebsiteExposureConfig{
+				Ingress: &WebsiteExposureIngressConfig{},
+			},
+			wantErr: "Ingress backend cannot cross namespaces",
+		},
+		{
+			name:    "ingress cross-namespace backendRef is rejected",
+			website: &WebsiteConfig{Enabled: &enabled},
+			config: &WebsiteExposureConfig{
+				Ingress:    &WebsiteExposureIngressConfig{},
+				BackendRef: &WebsiteExposureBackendReference{Name: "my-svc", Namespace: "elsewhere"},
+			},
+			wantErr: "Ingress backends cannot cross namespaces",
+		},
+		{
+			name:    "ingress non-Service backendRef is rejected",
+			website: &WebsiteConfig{Enabled: &enabled},
+			config: &WebsiteExposureConfig{
+				Ingress:    &WebsiteExposureIngressConfig{},
+				BackendRef: &WebsiteExposureBackendReference{Name: "my-svc", Kind: "ServiceImport", Group: "multicluster.x-k8s.io"},
+			},
+			wantErr: "must reference a core/v1 Service",
+		},
+		{
+			name:    "gateway with ServiceImport backendRef is valid",
+			website: &WebsiteConfig{Enabled: &enabled},
+			config: &WebsiteExposureConfig{
+				Gateway:    &WebsiteExposureGatewayConfig{ParentRefs: refs("gw")},
+				BackendRef: &WebsiteExposureBackendReference{Name: "garage", Kind: "ServiceImport", Group: "multicluster.x-k8s.io", Namespace: "garage-ns"},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bucket := newBucket(tc.website, tc.config)
+			if tc.name == "ingress cross-namespace is rejected" {
+				bucket.Spec.ClusterRef.Namespace = testTargetNS
+			}
+			err := ValidateGarageBucketSpec(bucket)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ValidateGarageBucketSpec = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("ValidateGarageBucketSpec = %v, want error containing %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 

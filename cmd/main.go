@@ -24,6 +24,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -49,6 +50,7 @@ import (
 	"github.com/rajsinghtech/garage-operator/internal/controller"
 	"github.com/rajsinghtech/garage-operator/internal/cosi"
 	cosiv1alpha2 "sigs.k8s.io/container-object-storage-interface/client/apis/objectstorage/v1alpha2"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -82,6 +84,10 @@ func clusterDomainDefault() string {
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(monitoringv1.AddToScheme(scheme))
+	// Gateway API is registered unconditionally: the bucket controller only
+	// creates HTTPRoutes when the CRDs are actually installed (REST-mapper
+	// probe), so the scheme entry is inert otherwise.
+	utilruntime.Must(gatewayv1.Install(scheme))
 	// v1alpha1 is a Spoke placeholder (no real objects exist) so the conversion
 	// webhook can dispatch without erroring on storedVersions migration sweeps.
 	// See api/v1alpha1/groupversion_info.go and issue #181.
@@ -154,6 +160,20 @@ func main() {
 	flag.BoolVar(&enableCOSI, "enable-cosi", false, "Enable COSI driver for Kubernetes-native object storage provisioning")
 	flag.StringVar(&cosiDriverName, "cosi-driver-name", "garage.rajsingh.info", "COSI driver name")
 	flag.StringVar(&cosiNamespace, "cosi-namespace", "garage-operator-system", "Namespace for COSI shadow resources")
+
+	// Gateway API flag (like cert-manager's --enable-gateway-api): gates the
+	// Gateway API half of GarageBucket spec.websiteExposure. HTTPRoutes are
+	// only created and watched when this flag is set AND the Gateway API
+	// CRDs are installed. Ingress exposure is always available.
+	var enableGatewayAPI bool
+	flag.BoolVar(&enableGatewayAPI, "enable-gateway-api", false,
+		"Enable Gateway API support for bucket website exposure (spec.websiteExposure.gateway). "+
+			"Requires the gateway.networking.k8s.io HTTPRoute CRDs to be installed.")
+	if v := os.Getenv("ENABLE_GATEWAY_API"); v != "" {
+		if parsed, err := strconv.ParseBool(v); err == nil {
+			enableGatewayAPI = parsed
+		}
+	}
 
 	opts := zap.Options{
 		Development: false,
@@ -332,6 +352,7 @@ func main() {
 		Scheme:              mgr.GetScheme(),
 		ClusterDomain:       clusterDomain,
 		COSIDriverName:      garageBucketCOSIDriverName,
+		EnableGatewayAPI:    enableGatewayAPI,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "GarageBucket")
 		os.Exit(1)

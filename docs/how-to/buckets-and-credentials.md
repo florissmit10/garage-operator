@@ -267,6 +267,78 @@ Set `spec.webApi.rootDomain` and publish the web API Service through the network
 
 When a `GarageKey` has exactly one `bucketRef`, set `secretTemplate.includeWebsiteUrl: true` to copy that bucket's observed `status.websiteUrl` into the generated Secret. The key defaults to `website-url` and can be changed with `websiteUrlKey`; the field is omitted until the bucket publishes a non-empty URL. Set `spec.webApi.scheme: https` when TLS is terminated by the proxy or load balancer in front of Garage.
 
+### Exposing a website bucket through an Ingress or HTTPRoute
+
+`spec.websiteExposure` lets the operator create an Ingress or Gateway API
+`HTTPRoute` that routes a hostname to the cluster's web API Service, so a
+website-enabled bucket is reachable at its alias hostname without exposing the
+Service yourself.
+
+```yaml
+spec:
+  website:
+    enabled: true
+    indexDocument: index.html
+    errorDocument: error.html
+  websiteExposure:
+    # hostnames: [site.example.com, www.example.com]   # default: <globalAlias><webApi.rootDomain>;
+    #   for ingress only the canonical host or the global alias are accepted
+    # Either ingress or gateway — not both.
+    ingress:
+      ingressClassName: traefik
+      # tlsSecretName: site-tls   # Ingress TLS section only (bucket's namespace)
+    # gateway:
+    #   parentRefs:
+    #     - name: garage-gateway
+    #       namespace: gateway   # omit for the bucket's namespace
+    #       kind: Gateway
+    #       sectionName: web
+    #   # labels: { external-dns.alpha.kubernetes.io/hostname: site.example.com }
+    # # Optional backend override (e.g. a ServiceImport):
+    # # backendRef:
+    # #   name: garage
+    # #   kind: ServiceImport
+    # #   group: multicluster.x-k8s.io
+    # #   namespace: garage-ns
+```
+
+The resource is named `<bucket>-website` and is created **in the bucket's
+namespace**, controller-owned by the bucket (garbage-collected with it).
+`websiteExposure` requires `spec.website.enabled: true`.
+
+- **Ingress** is only valid when the bucket and its cluster share a
+  namespace, because an Ingress backend cannot cross namespaces. Its backend
+  is the cluster's web API Service in that namespace (`<cluster>-gateway`
+  for unified clusters, `<cluster>` otherwise).
+- **HTTPRoute** works cross-namespace: the route is created in the bucket's
+  namespace and its backendRef points at the cluster's web API Service in
+  the cluster's namespace. That cross-namespace backend needs a Gateway API
+  `ReferenceGrant` in the **cluster's** namespace (owned by the storage
+  admin) allowing HTTPRoutes from the bucket's namespace. HTTPRoute
+  exposure also requires the Gateway API CRDs and the operator started with
+  `--enable-gateway-api` (or the chart's `gatewayAPI.enabled: true`);
+  without them the `WebsiteExposed` condition reports
+  `GatewayAPIUnavailable`.
+
+The routed hostnames default to the single canonical
+`<globalAlias><webApi.rootDomain>`; list `hostnames` to route more (no
+wildcards, no duplicates). Garage resolves the bucket from the `Host`
+header and falls back to the full Host as the alias, so a hostname equal to
+the global alias also works. For an `HTTPRoute`, a hostname that is neither
+canonical nor the bare alias gets a `URLRewrite` filter rewriting the Host
+header to the canonical host. For an `Ingress`, which has no such rewrite,
+only the canonical hostname and the global alias are accepted — any other
+hostname is refused on the `WebsiteExposed` condition (use a `gateway`
+exposure to route additional hostnames). `tlsSecretName` (under `ingress`)
+fills the Ingress `spec.tls` section; for an `HTTPRoute` TLS is configured
+on the parent `Gateway`.
+
+The `WebsiteExposed` condition and `status.websiteExposure` surface the
+resource (type, name, hostnames) and, for an `HTTPRoute`, the per-parent
+`Accepted`/`ResolvedRefs`/`Ready` states the Gateway controller reports on
+the route's `status.parents` — so readiness reflects the Gateway actually
+accepting the route and resolving its backend, not just the object existing.
+
 ## Lifecycle rules
 
 Garage evaluates lifecycle rules asynchronously, normally in its daily lifecycle worker. The operator supports expiration by age/date, prefix and object-size filters, and aborting incomplete multipart uploads; tag filters are not supported.

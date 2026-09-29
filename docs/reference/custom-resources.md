@@ -268,7 +268,18 @@ must be configured through S3 APIs. `lifecycle` supports Garage's subset of
 S3 expiration and incomplete-multipart rules and is evaluated asynchronously
 by Garage's lifecycle worker. `keyPermissions` and
 `GarageKey.spec.bucketPermissions` are equivalent declaration directions and
-are merged when both describe the same grant.
+are merged when both describe the same grant. `websiteExposure` (requires `website.enabled`) creates an
+`Ingress` or a Gateway API `HTTPRoute` (exactly one of the two) in the
+**bucket's** namespace that routes the canonical
+`<globalAlias><webApi.rootDomain>` — or the listed `hostnames` — to the
+cluster web API Service (`<cluster>-gateway` for unified clusters) or an
+explicit `backendRef` override. An HTTPRoute accepts any listed hostname
+(non-canonical ones get a `URLRewrite` back to the canonical host); an
+Ingress only accepts the canonical host or the global alias, because it
+cannot rewrite the Host header. Ingress is same-namespace only; an
+HTTPRoute crosses namespaces through a Gateway API `ReferenceGrant` in the
+cluster's namespace. `ingress.tlsSecretName` fills the Ingress TLS section
+and is ignored for `HTTPRoute`s.
 
 Bucket and key references can name a namespace; cross-namespace grants must be
 approved by a `GarageReferenceGrant` in the cluster's namespace.
@@ -284,12 +295,15 @@ Garage cluster or storage can still make the data unavailable.
 `status.bucketId`, `phase`, `globalAlias`, and `createdAt` identify the remote
 bucket. `size`, incomplete-upload counters, `quotaUsage`, `websiteEnabled`,
 `websiteUrl`, and `websiteConfig` report observed state. `keys`,
-`localAliases`, and `lifecycleRules` are read-back summaries. The
+`localAliases`, and `lifecycleRules` are read-back summaries.
+`websiteExposure` records the exposed resource (`type`, `name`, `hostnames`,
+and, for an HTTPRoute, the per-parent `Accepted`/`ResolvedRefs`/`Ready`
+states) when `spec.websiteExposure` is set. The
 `managedGlobalAlias`, `pendingGlobalAlias`, `managedLocalAliases`, and
 `managedKeyGrants` fields are controller ownership records used for crash-safe
-replacement and revocation; do not edit them. Inspect the `Ready` and
-`LifecycleConfigured` conditions, plus `BucketLookupStuck` or
-`BucketMetadataDegraded` when a bucket is not ready. During a requested
+replacement and revocation; do not edit them. Inspect the `Ready`,
+`LifecycleConfigured`, and `WebsiteExposed` conditions, plus
+`BucketLookupStuck` or `BucketMetadataDegraded` when a bucket is not ready. During a requested
 `Delete`, a non-empty remote bucket sets `DeletionBlocked=True` with reason
 `BucketNotEmpty` and leaves the finalizer in place until an operator or
 administrator removes the content. The older bucket condition

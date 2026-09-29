@@ -27,17 +27,20 @@ import (
 	"strings"
 	"time"
 
+	networkingv1 "k8s.io/api/networking/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	cosiv1alpha2 "sigs.k8s.io/container-object-storage-interface/client/apis/objectstorage/v1alpha2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	garagev1beta1 "github.com/rajsinghtech/garage-operator/api/v1beta1"
 	garagev1beta2 "github.com/rajsinghtech/garage-operator/api/v1beta2"
@@ -80,6 +83,11 @@ type GarageBucketReconciler struct {
 	Scheme              *runtime.Scheme
 	ClusterDomain       string
 	COSIDriverName      string
+	// EnableGatewayAPI gates the Gateway API half of spec.websiteExposure
+	// (like cert-manager's --enable-gateway-api): HTTPRoutes are only created
+	// and watched when the flag is set AND the Gateway API CRDs are installed.
+	// Ingress exposure is unaffected.
+	EnableGatewayAPI bool
 }
 
 func (r *GarageBucketReconciler) authorizationReader() client.Reader {
@@ -376,7 +384,23 @@ func (r *GarageBucketReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return r.updateStatus(ctx, bucket, PhaseFailed, err)
 	}
 
-	return r.updateStatusFromGarage(ctx, bucket, garageClient, cluster, reconcileSnapshot)
+	result, err := r.updateStatusFromGarage(ctx, bucket, garageClient, cluster, reconcileSnapshot)
+	if err != nil {
+		return result, err
+	}
+
+	// Website exposure (Ingress/HTTPRoute) reconciles after the status update:
+	// updateStatusFromGarage snapshots the old status for its no-op comparison,
+	// so exposure status mutations must happen after it. Exposure failures are
+	// surfaced on the WebsiteExposed condition and never fail the bucket.
+	exposureResult, exposureErr := r.reconcileWebsiteExposure(ctx, bucket, cluster)
+	if exposureErr != nil {
+		return exposureResult, exposureErr
+	}
+	if exposureResult.RequeueAfter > 0 && (result.RequeueAfter == 0 || exposureResult.RequeueAfter < result.RequeueAfter) {
+		result.RequeueAfter = exposureResult.RequeueAfter
+	}
+	return result, nil
 }
 
 func isCOSIManagedPendingOrBoundShadow(object metav1.Object) bool {
@@ -2066,10 +2090,22 @@ func ownerRefExists(obj client.Object, uid types.UID) bool {
 	return false
 }
 
-// SetupWithManager sets up the controller with the Manager.
+// SetupWithManager sets up the controller with the Manager. The owned
+// Ingress/HTTPRoute exposures are watched back to the bucket so a route
+// status change (Gateway Accepted/ResolvedRefs/Ready) re-reconciles the
+// bucket and refreshes the WebsiteExposed condition. The HTTPRoute watch is
+// only registered when Gateway API is enabled AND the CRDs exist, so a
+// cluster without the CRDs (or an operator started without
+// --enable-gateway-api) starts no HTTPRoute informer.
 func (r *GarageBucketReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	bldr := ctrl.NewControllerManagedBy(mgr).
 		For(&garagev1beta1.GarageBucket{}).
-		Named("garagebucket").
-		Complete(r)
+		Owns(&networkingv1.Ingress{}).
+		Named("garagebucket")
+	if r.EnableGatewayAPI && r.RESTMapper() != nil {
+		if _, err := r.RESTMapper().RESTMapping(schema.GroupKind{Group: "gateway.networking.k8s.io", Kind: websiteExposureResourceHTTPRoute}); err == nil {
+			bldr = bldr.Owns(&gatewayv1.HTTPRoute{})
+		}
+	}
+	return bldr.Complete(r)
 }
