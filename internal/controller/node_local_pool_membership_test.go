@@ -583,7 +583,6 @@ func TestNodeLocalPoolProjectedSafetyStatusBudget(t *testing.T) {
 	const (
 		maximumResyncWorkersPerNode  = 8   // API validation maximum
 		maximumPositiveCapacityRoles = 256 // Garage CompactNodeType hard limit
-		maximumReportedBlockErrors   = 32  // detailed status is a bounded "top errors" projection
 		drainTransactionBudget       = 512 * 1024
 		statusSafetyBudget           = 1024 * 1024 // leaves at least 512 KiB of the 1.5 MiB API-object envelope for spec/metadata
 	)

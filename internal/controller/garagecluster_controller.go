@@ -4247,6 +4247,7 @@ func (r *GarageClusterReconciler) updateStatusFromCluster(ctx context.Context, c
 	var observedGarageVersions []string
 
 	if desiredReplicas == 0 {
+		clearBlockResyncStatus(&cluster.Status)
 		// Both tiers scaled to 0: owned resources still need periodic drift
 		// reconciliation.
 		if res, err := r.updateStatus(ctx, cluster, "Pending", nil); err != nil {
@@ -4405,6 +4406,14 @@ func (r *GarageClusterReconciler) updateStatusFromCluster(ctx context.Context, c
 				}
 			}
 		}
+	}
+
+	// Skip when health already failed so an unreachable Admin API does not
+	// add two more timeouts per pass.
+	if healthReadSucceeded {
+		observeBlockResyncStatus(ctx, garageClient, &cluster.Status, time.Now())
+	} else {
+		clearBlockResyncStatus(&cluster.Status)
 	}
 
 	// Update phase based on readiness
