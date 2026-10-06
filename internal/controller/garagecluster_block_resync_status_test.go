@@ -92,7 +92,7 @@ func TestObserveBlockResyncStatusAggregatesNodes(t *testing.T) {
 	now := time.Date(2026, time.October, 6, 12, 0, 0, 0, time.UTC)
 
 	status := &garagev1beta2.GarageClusterStatus{}
-	observeBlockResyncStatus(context.Background(), client, status, now)
+	observeBlockResyncStatus(context.Background(), client, status, now, nil)
 
 	if status.ResyncQueueLength == nil || *status.ResyncQueueLength != 1350 {
 		t.Fatalf("ResyncQueueLength = %v, want 1350", status.ResyncQueueLength)
@@ -122,7 +122,7 @@ func TestObserveBlockResyncStatusAggregatesNodes(t *testing.T) {
 	later := strings.NewReplacer(`"lastTrySecsAgo":30`, `"lastTrySecsAgo":31`,
 		`"lastTrySecsAgo":20`, `"lastTrySecsAgo":21`, `"lastTrySecsAgo":10`, `"lastTrySecsAgo":11`,
 		`"nextTryInSecs":300`, `"nextTryInSecs":299`).Replace(blockErrors)
-	observeBlockResyncStatus(context.Background(), newResyncStatusAdmin(t, workers, later), status, now.Add(time.Second))
+	observeBlockResyncStatus(context.Background(), newResyncStatusAdmin(t, workers, later), status, now.Add(time.Second), nil)
 	if !equality.Semantic.DeepEqual(before, status) {
 		t.Fatalf("steady block errors rewrote status:\nbefore %+v\nafter  %+v", before.BlockErrorDetails, status.BlockErrorDetails)
 	}
@@ -184,7 +184,7 @@ func TestObserveBlockResyncStatusClearsUnobservedFields(t *testing.T) {
 		"one node unanswered": newResyncStatusAdmin(t, partialWorkers, partialErrors),
 	} {
 		status := previous.DeepCopy()
-		observeBlockResyncStatus(context.Background(), client, status, time.Now())
+		observeBlockResyncStatus(context.Background(), client, status, time.Now(), nil)
 		if status.ResyncQueueLength != nil || status.BlockErrors != nil || status.BlockErrorDetails != nil {
 			t.Fatalf("%s: unobserved fields were not cleared: %+v", name, status)
 		}
@@ -202,7 +202,7 @@ func TestObserveBlockResyncStatusClearsResolvedErrors(t *testing.T) {
 		`{"success":{"storage-a":[`+resyncWorkerJSON(1, 0)+`]},"error":{}}`,
 		`{"success":{"storage-a":[]},"error":{}}`)
 
-	observeBlockResyncStatus(context.Background(), client, status, time.Now())
+	observeBlockResyncStatus(context.Background(), client, status, time.Now(), nil)
 
 	if status.ResyncQueueLength == nil || *status.ResyncQueueLength != 0 ||
 		status.BlockErrors == nil || *status.BlockErrors != 0 || status.BlockErrorDetails != nil {
@@ -226,5 +226,56 @@ func TestApplyBlockErrorStatusBoundsTopErrors(t *testing.T) {
 	}
 	if status.BlockErrorDetails.TopErrors[0].ErrorCount != maximumReportedBlockErrors+7 {
 		t.Fatalf("top errors not ordered worst-first: %+v", status.BlockErrorDetails.TopErrors[0])
+	}
+}
+
+func TestObserveBlockResyncStatusToleratesSilentCapacitylessGateways(t *testing.T) {
+	t.Parallel()
+	// A federated or edge-gateway cluster often has an unreachable remote
+	// gateway. It stores no blocks, so its silence must not blank the fields.
+	workers := `{"success":{"storage-a":[` + resyncWorkerJSON(1, 7) + `]},"error":{"gateway-x":"not connected"}}`
+	blockErrors := `{"success":{"storage-a":[]},"error":{"gateway-x":"not connected"}}`
+	ignorable := capacitylessGatewayNodeIDs(&garage.ClusterStatus{Nodes: []garage.NodeInfo{
+		{ID: "storage-a", IsUp: true, Role: &garage.NodeAssignedRole{Zone: "z", Capacity: ptr.To[uint64](1 << 30)}},
+		{ID: "gateway-x", IsUp: false, Role: &garage.NodeAssignedRole{Zone: "z"}},
+	}})
+
+	status := &garagev1beta2.GarageClusterStatus{}
+	observeBlockResyncStatus(context.Background(), newResyncStatusAdmin(t, workers, blockErrors), status, time.Now(), ignorable)
+	if status.ResyncQueueLength == nil || *status.ResyncQueueLength != 7 {
+		t.Fatalf("ResyncQueueLength = %v, want 7 despite the silent gateway", status.ResyncQueueLength)
+	}
+	if status.BlockErrors == nil || *status.BlockErrors != 0 {
+		t.Fatalf("BlockErrors = %v, want observed 0 despite the silent gateway", status.BlockErrors)
+	}
+
+	// A silent storage node still makes the observation partial, even when
+	// some gateway is ignorable.
+	storageSilent := `{"success":{"gateway-x":[]},"error":{"storage-a":"not connected"}}`
+	status = &garagev1beta2.GarageClusterStatus{}
+	observeBlockResyncStatus(context.Background(), newResyncStatusAdmin(t, storageSilent, storageSilent), status, time.Now(), ignorable)
+	if status.ResyncQueueLength != nil || status.BlockErrors != nil {
+		t.Fatalf("silent storage node must leave fields unobserved, got queue=%v errors=%v", status.ResyncQueueLength, status.BlockErrors)
+	}
+}
+
+func TestCapacitylessGatewayNodeIDs(t *testing.T) {
+	t.Parallel()
+	if got := capacitylessGatewayNodeIDs(nil); got != nil {
+		t.Fatalf("nil cluster status must ignore nothing, got %v", got)
+	}
+	got := capacitylessGatewayNodeIDs(&garage.ClusterStatus{Nodes: []garage.NodeInfo{
+		{ID: "storage", Role: &garage.NodeAssignedRole{Capacity: ptr.To[uint64](1)}},
+		{ID: "gateway", Role: &garage.NodeAssignedRole{}},
+		{ID: "zero-capacity", Role: &garage.NodeAssignedRole{Capacity: ptr.To[uint64](0)}},
+		// Draining: part of an older layout version and may still be the
+		// source of a block transfer.
+		{ID: "draining-gateway", Draining: true, Role: &garage.NodeAssignedRole{}},
+		// No current role: removed or never assigned; not provably blockless.
+		{ID: "roleless"},
+	}})
+	want := map[string]struct{}{"gateway": {}, "zero-capacity": {}}
+	if !equality.Semantic.DeepEqual(got, want) {
+		t.Fatalf("capacitylessGatewayNodeIDs = %v, want %v", got, want)
 	}
 }

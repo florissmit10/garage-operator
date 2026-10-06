@@ -42,13 +42,18 @@ const (
 
 // observeBlockResyncStatus refreshes ResyncQueueLength and the block-error
 // fields from every node Garage can address. A field is left unobserved (nil)
-// unless every node answered: a sum that skips a down node holding the
-// backlog must not look drained.
+// unless every node that can hold blocks answered: a sum that skips a down
+// node holding the backlog must not look drained. Nodes in
+// ignorableNodeIDs (current capacityless gateway roles, see
+// capacitylessGatewayNodeIDs) store no blocks, so their silence is tolerated;
+// otherwise one unreachable remote gateway would blank these fields on every
+// federated or edge-gateway cluster.
 func observeBlockResyncStatus(
 	ctx context.Context,
 	garageClient *garage.Client,
 	status *garagev1beta2.GarageClusterStatus,
 	now time.Time,
+	ignorableNodeIDs map[string]struct{},
 ) {
 	log := logf.FromContext(ctx)
 
@@ -57,7 +62,7 @@ func observeBlockResyncStatus(
 	case err != nil:
 		log.V(1).Info("Failed to list Garage workers for resync status", "error", err)
 		status.ResyncQueueLength = nil
-	case logPartialNodeErrors(ctx, "ListWorkers", workers.Error):
+	case logPartialNodeErrors(ctx, "ListWorkers", workers.Error, ignorableNodeIDs):
 		status.ResyncQueueLength = nil
 	default:
 		status.ResyncQueueLength = ptr.To(resyncQueueLength(workers))
@@ -68,7 +73,7 @@ func observeBlockResyncStatus(
 	case err != nil:
 		log.V(1).Info("Failed to list Garage block errors for status", "error", err)
 		clearBlockErrorStatus(status)
-	case logPartialNodeErrors(ctx, "ListBlockErrors", blockErrors.Error):
+	case logPartialNodeErrors(ctx, "ListBlockErrors", blockErrors.Error, ignorableNodeIDs):
 		clearBlockErrorStatus(status)
 	default:
 		applyBlockErrorStatus(status, blockErrors, now)
@@ -85,13 +90,43 @@ func clearBlockErrorStatus(status *garagev1beta2.GarageClusterStatus) {
 	status.BlockErrorDetails = nil
 }
 
-// logPartialNodeErrors reports whether any node failed to answer.
-func logPartialNodeErrors(ctx context.Context, operation string, nodeErrors map[string]string) bool {
+// logPartialNodeErrors reports whether any node that can hold blocks failed
+// to answer. Silence from an ignorable (capacityless gateway) node is logged
+// but does not make the observation partial.
+func logPartialNodeErrors(ctx context.Context, operation string, nodeErrors map[string]string, ignorableNodeIDs map[string]struct{}) bool {
+	partial := false
 	for nodeID, message := range nodeErrors {
+		_, ignorable := ignorableNodeIDs[nodeID]
 		logf.FromContext(ctx).V(1).Info("Garage node did not answer for resync status",
-			"operation", operation, "node", shortID(nodeID), "error", message)
+			"operation", operation, "node", shortID(nodeID), "capacitylessGateway", ignorable, "error", message)
+		if !ignorable {
+			partial = true
+		}
 	}
-	return len(nodeErrors) > 0
+	return partial
+}
+
+// capacitylessGatewayNodeIDs returns the nodes whose current layout role has
+// no storage capacity and which are not draining an older layout version.
+// Such nodes never hold object blocks. A draining node may still be the
+// source of a block transfer, and a node absent from status is unknown, so
+// neither is ignorable. A nil status (GetClusterStatus failed) ignores
+// nothing, keeping the observation strict.
+func capacitylessGatewayNodeIDs(clusterStatus *garage.ClusterStatus) map[string]struct{} {
+	if clusterStatus == nil {
+		return nil
+	}
+	ids := make(map[string]struct{})
+	for i := range clusterStatus.Nodes {
+		node := &clusterStatus.Nodes[i]
+		if node.Draining || node.Role == nil {
+			continue
+		}
+		if node.Role.Capacity == nil || *node.Role.Capacity == 0 {
+			ids[node.ID] = struct{}{}
+		}
+	}
+	return ids
 }
 
 // resyncQueueLength sums the per-node resync queue. Every resync worker on a

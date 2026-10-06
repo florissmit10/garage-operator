@@ -1547,8 +1547,9 @@ type GarageClusterStatus struct {
 	LayoutHistory *LayoutHistoryStatus `json:"layoutHistory,omitempty"`
 
 	// BlockErrors is the count of blocks with sync errors across all nodes.
-	// Absent means not observed (Admin API unreachable or a node did not
-	// answer); 0 means observed with no errors.
+	// Absent means not observed (Admin API unreachable, or a node that can
+	// hold blocks did not answer; silent capacityless gateways are ignored).
+	// 0 means observed with no errors.
 	// +optional
 	BlockErrors *int32 `json:"blockErrors,omitempty"`
 
@@ -1557,8 +1558,9 @@ type GarageClusterStatus struct {
 	BlockErrorDetails *BlockErrorsStatus `json:"blockErrorDetails,omitempty"`
 
 	// ResyncQueueLength is the total block resync queue depth across all nodes.
-	// Absent means not observed (Admin API unreachable or a node did not
-	// answer); 0 means observed and drained.
+	// Absent means not observed (Admin API unreachable, or a node that can
+	// hold blocks did not answer; silent capacityless gateways are ignored).
+	// 0 means observed and drained.
 	// +optional
 	ResyncQueueLength *int64 `json:"resyncQueueLength,omitempty"`
 

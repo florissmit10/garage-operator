@@ -4266,6 +4266,7 @@ func (r *GarageClusterReconciler) updateStatusFromCluster(ctx context.Context, c
 	garageClient := r.healthStatusGarageClient(ctx, cluster, adminPort)
 	healthObservationExpected := cluster.Spec.Admin != nil && cluster.Spec.Admin.AdminTokenSecretRef != nil
 	healthReadSucceeded := false
+	var observedClusterStatus *garage.ClusterStatus
 	if garageClient != nil && readyReplicas > 0 {
 		health, err := garageClient.GetClusterHealth(ctx)
 		if err != nil {
@@ -4290,6 +4291,7 @@ func (r *GarageClusterReconciler) updateStatusFromCluster(ctx context.Context, c
 		if err != nil {
 			log.V(1).Info("Failed to get cluster status", "error", err)
 		} else {
+			observedClusterStatus = status
 			// Sustained-unreachable peer detection: the admin API exposes only
 			// is_up + lastSeenSecsAgo (not Garage's internal Abandoned state), so
 			// we flag peers down longer than the threshold. Transient restarts
@@ -4411,7 +4413,7 @@ func (r *GarageClusterReconciler) updateStatusFromCluster(ctx context.Context, c
 	// Skip when health already failed so an unreachable Admin API does not
 	// add two more timeouts per pass.
 	if healthReadSucceeded {
-		observeBlockResyncStatus(ctx, garageClient, &cluster.Status, time.Now())
+		observeBlockResyncStatus(ctx, garageClient, &cluster.Status, time.Now(), capacitylessGatewayNodeIDs(observedClusterStatus))
 	} else {
 		clearBlockResyncStatus(&cluster.Status)
 	}

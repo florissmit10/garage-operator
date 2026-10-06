@@ -4996,8 +4996,9 @@ spec:
               blockErrors:
                 description: |-
                   BlockErrors is the count of blocks with sync errors across all nodes.
-                  Absent means not observed (Admin API unreachable or a node did not
-                  answer); 0 means observed with no errors.
+                  Absent means not observed (Admin API unreachable, or a node that can
+                  hold blocks did not answer; silent capacityless gateways are ignored).
+                  0 means observed with no errors.
                 format: int32
                 type: integer
               buildInfo:
@@ -5432,8 +5433,9 @@ spec:
               resyncQueueLength:
                 description: |-
                   ResyncQueueLength is the total block resync queue depth across all nodes.
-                  Absent means not observed (Admin API unreachable or a node did not
-                  answer); 0 means observed and drained.
+                  Absent means not observed (Admin API unreachable, or a node that can
+                  hold blocks did not answer; silent capacityless gateways are ignored).
+                  0 means observed and drained.
                 format: int64
                 type: integer
               scaleReplicas:
@@ -15885,8 +15887,9 @@ spec:
               blockErrors:
                 description: |-
                   BlockErrors is the count of blocks with sync errors across all nodes.
-                  Absent means not observed (Admin API unreachable or a node did not
-                  answer); 0 means observed with no errors.
+                  Absent means not observed (Admin API unreachable, or a node that can
+                  hold blocks did not answer; silent capacityless gateways are ignored).
+                  0 means observed with no errors.
                 format: int32
                 type: integer
               buildInfo:
@@ -16376,8 +16379,9 @@ spec:
               resyncQueueLength:
                 description: |-
                   ResyncQueueLength is the total block resync queue depth across all nodes.
-                  Absent means not observed (Admin API unreachable or a node did not
-                  answer); 0 means observed and drained.
+                  Absent means not observed (Admin API unreachable, or a node that can
+                  hold blocks did not answer; silent capacityless gateways are ignored).
+                  0 means observed and drained.
                 format: int64
                 type: integer
               scaleReplicas:
