@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	stderrors "errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -145,8 +146,8 @@ func TestOperatorAdminTokenConditionNamesBlockingPodAndRecovers(t *testing.T) {
 }
 
 func TestOperatorAdminTokenConditionDoesNotClaimBlockBeforeTokenIsAuthoritative(t *testing.T) {
-	podSetErr := &operatorAdminPodSetError{err: stderrors.New(
-		"waiting for exact node-local-pool Pod for GarageNode garage/garage-node-local-storage-node-a")}
+	podSetErr := managedPodNotReady(
+		"waiting for exact node-local-pool Pod for GarageNode garage/garage-node-local-storage-node-a")
 
 	blocked := operatorAdminTokenCondition(podSetErr, true)
 	if !strings.Contains(blocked.Message, "blocked") ||
@@ -164,6 +165,60 @@ func TestOperatorAdminTokenConditionDoesNotClaimBlockBeforeTokenIsAuthoritative(
 	if other.Reason != garagev1beta1.ReasonOperatorAdminTokenProvisioning {
 		t.Fatalf("pre-authoritative non-Pod failure reason = %q", other.Reason)
 	}
+
+	// The create path returns nil before the new token is verified anywhere.
+	created := operatorAdminTokenCondition(nil, false)
+	if created.Status != metav1.ConditionFalse || created.Reason != garagev1beta1.ReasonOperatorAdminTokenProvisioning {
+		t.Fatalf("freshly created token condition = %+v, want False/Provisioning", created)
+	}
+
+	integrity := operatorAdminTokenCondition(stderrors.New("cluster Admin Service can route to unaccounted Pod x/y"), true)
+	if integrity.Reason != garagev1beta1.ReasonOperatorAdminTokenNotVerified {
+		t.Fatalf("non-Pod-readiness failure reason = %q, want NotVerified", integrity.Reason)
+	}
+}
+
+func TestOperatorAdminPodSetErrorTagsOnlyMissingOrUnreadyPods(t *testing.T) {
+	ctx := context.Background()
+
+	cluster, objects := operatorPodSetFixture(2, 0, 2)
+	reader := fake.NewClientBuilder().WithScheme(operatorPodSetTestScheme(t)).WithObjects(objects...).Build()
+	var podSetErr *operatorAdminPodSetError
+	if _, err := expectedOperatorAdminPodSet(ctx, reader, cluster); !stderrors.As(err, &podSetErr) {
+		t.Fatalf("missing StatefulSet ordinal not tagged as a Pod-readiness wait: %v", err)
+	}
+
+	cluster, objects = operatorPodSetFixture(1, 0)
+	objects = append(objects, &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "stray", Namespace: cluster.Namespace, UID: "stray-uid",
+			Labels: map[string]string{labelCluster: cluster.Name},
+		},
+	})
+	reader = fake.NewClientBuilder().WithScheme(operatorPodSetTestScheme(t)).WithObjects(objects...).Build()
+	_, err := expectedOperatorAdminPodSet(ctx, reader, cluster)
+	if err == nil || stderrors.As(err, &podSetErr) {
+		t.Fatalf("integrity failure was reported as a Pod-readiness wait: %v", err)
+	}
+}
+
+func TestGarageNotReadyPodNamesSchedulingGates(t *testing.T) {
+	_, objects := operatorPodSetFixture(1, 0)
+	var pod *corev1.Pod
+	for _, object := range objects {
+		if p, ok := object.(*corev1.Pod); ok {
+			pod = p
+		}
+	}
+	pod.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: nodeLocalPoolSchedulingGateName}}
+	pod.Status = corev1.PodStatus{Phase: corev1.PodPending}
+
+	_, err := operatorAdminPodRecord(pod, "")
+	var podSetErr *operatorAdminPodSetError
+	if !stderrors.As(err, &podSetErr) ||
+		!strings.Contains(err.Error(), "held at scheduling gate(s) "+nodeLocalPoolSchedulingGateName) {
+		t.Fatalf("gated Pod error = %v", err)
+	}
 }
 
 func TestOperatorAdminTokenConditionRemovedWhenAdminTokenUnconfigured(t *testing.T) {
@@ -180,15 +235,21 @@ func TestOperatorAdminTokenConditionRemovedWhenAdminTokenUnconfigured(t *testing
 	if err := r.setOperatorAdminTokenCondition(context.Background(), cluster, nil); err != nil {
 		t.Fatal(err)
 	}
-	if meta.FindStatusCondition(cluster.Status.Conditions, garagev1beta1.ConditionOperatorAdminTokenReady) != nil {
+	stored := &garagev1beta2.GarageCluster{}
+	if err := kubeClient.Get(context.Background(), client.ObjectKeyFromObject(cluster), stored); err != nil {
+		t.Fatal(err)
+	}
+	if meta.FindStatusCondition(stored.Status.Conditions, garagev1beta1.ConditionOperatorAdminTokenReady) != nil {
 		t.Fatal("condition kept on a cluster without an operator Admin token")
 	}
 }
 
 func TestGarageClientErrorPointsAtClusterCondition(t *testing.T) {
 	cluster := &garagev1beta2.GarageCluster{ObjectMeta: metav1.ObjectMeta{Name: "garage", Namespace: "storage"}}
-	err := garageClientError(cluster, stderrors.Join(errAdminTokenUnproven, stderrors.New("managed Pod storage/garage-0 is not Ready")))
-	for _, want := range []string{"GarageCluster storage/garage", garagev1beta1.ConditionOperatorAdminTokenReady, "storage/garage-0"} {
+	err := garageClientError(cluster, fmt.Errorf("%w: %w", errAdminTokenUnproven,
+		managedPodNotReady("managed Pod storage/garage-0 is not Ready")))
+	for _, want := range []string{"GarageCluster storage/garage", garagev1beta1.ConditionOperatorAdminTokenReady,
+		"for the blocking Pod", "storage/garage-0"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("dependent error %q does not mention %q", err.Error(), want)
 		}
@@ -198,5 +259,16 @@ func TestGarageClientErrorPointsAtClusterCondition(t *testing.T) {
 	}
 	if got := garageClientError(cluster, stderrors.New("boom")).Error(); got != "failed to create garage client: boom" {
 		t.Fatalf("unrelated client error changed: %q", got)
+	}
+
+	handle := &garagev1beta2.GarageCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "handle", Namespace: "apps"},
+		Spec: garagev1beta2.GarageClusterSpec{ConnectTo: &garagev1beta2.ConnectToConfig{
+			ClusterRef: &garagev1beta2.ClusterReference{Name: "garage", Namespace: "storage"},
+		}},
+	}
+	unverified := garageClientError(handle, errAdminTokenUnproven).Error()
+	if !strings.Contains(unverified, "GarageCluster storage/garage") || strings.Contains(unverified, "blocking Pod") {
+		t.Fatalf("unverified-token error via clusterRef = %q", unverified)
 	}
 }

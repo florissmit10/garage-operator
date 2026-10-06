@@ -123,20 +123,13 @@ func validateManagedAdminTokenInfo(info *garage.AdminTokenInfo, id, name string,
 // static bootstrap credential it already uses before a dynamic token exists.
 var errAdminTokenUnproven = stderrors.New("dynamic operator Admin token is intact but unproven on the live Pod incarnation set")
 
-// operatorAdminPodSetError marks a token reconcile that failed because the
-// managed process set is incomplete or not Ready, so status can name the Pod.
-type operatorAdminPodSetError struct{ err error }
-
-func (e *operatorAdminPodSetError) Error() string { return e.err.Error() }
-func (e *operatorAdminPodSetError) Unwrap() error { return e.err }
-
 // operatorAdminTokenCondition maps the outcome of reconcileOperatorAdminToken
 // to ConditionOperatorAdminTokenReady. authoritative reports whether the
 // dynamic token already gates the shared Admin client: before that, a failure
 // does not block dependents because they still use the static credential.
 func operatorAdminTokenCondition(tokenErr error, authoritative bool) metav1.Condition {
 	condition := metav1.Condition{Type: garagev1beta1.ConditionOperatorAdminTokenReady}
-	if tokenErr == nil {
+	if tokenErr == nil && authoritative {
 		condition.Status = metav1.ConditionTrue
 		condition.Reason = garagev1beta1.ReasonOperatorAdminTokenVerified
 		condition.Message = "dynamic operator Admin token is verified on every managed Garage process"
@@ -149,10 +142,15 @@ func operatorAdminTokenCondition(tokenErr error, authoritative bool) metav1.Cond
 	}
 	var podSetErr *operatorAdminPodSetError
 	switch {
+	case tokenErr == nil:
+		// The create path returns before the new token is verified anywhere.
+		condition.Reason = garagev1beta1.ReasonOperatorAdminTokenProvisioning
+		condition.Message = fmt.Sprintf(
+			"dynamic operator Admin token was created and awaits verification on every managed Garage process (%s)", effect)
 	case stderrors.As(tokenErr, &podSetErr):
 		condition.Reason = garagev1beta1.ReasonOperatorAdminTokenManagedPodsNotReady
 		condition.Message = fmt.Sprintf(
-			"dynamic operator Admin token needs every managed Garage Pod Ready (%s): %v", effect, podSetErr.err)
+			"dynamic operator Admin token needs every managed Garage Pod Ready (%s): %v", effect, podSetErr)
 	case authoritative:
 		condition.Reason = garagev1beta1.ReasonOperatorAdminTokenNotVerified
 		condition.Message = fmt.Sprintf(
@@ -187,15 +185,14 @@ func (r *GarageClusterReconciler) setOperatorAdminTokenCondition(
 		apply()
 		return UpdateStatusWithRetry(ctx, r.Client, cluster, apply)
 	}
+	// Uncached: the success path has just patched the ready marker.
 	authoritative := false
-	if tokenErr != nil {
-		secret := &corev1.Secret{}
-		key := types.NamespacedName{Name: operatorAdminTokenSecretName(cluster), Namespace: cluster.Namespace}
-		if err := r.Get(ctx, key, secret); err == nil {
-			authoritative = secret.Annotations[annotationOperatorAdminTokenReady] == operatorAdminTokenReadyValue
-		} else if !errors.IsNotFound(err) {
-			return err
-		}
+	secret := &corev1.Secret{}
+	key := types.NamespacedName{Name: operatorAdminTokenSecretName(cluster), Namespace: cluster.Namespace}
+	if err := r.safetyReader().Get(ctx, key, secret); err == nil {
+		authoritative = secret.Annotations[annotationOperatorAdminTokenReady] == operatorAdminTokenReadyValue
+	} else if !errors.IsNotFound(err) {
+		return err
 	}
 	condition := operatorAdminTokenCondition(tokenErr, authoritative)
 	condition.ObservedGeneration = cluster.Generation
@@ -227,11 +224,23 @@ func garageClientError(cluster *garagev1beta2.GarageCluster, err error) error {
 		return fmt.Errorf("failed to create garage client: %w", err)
 	}
 	owner := "the referenced GarageCluster"
-	if cluster != nil && (cluster.Spec.ConnectTo == nil || cluster.Spec.ConnectTo.ClusterRef == nil) {
-		owner = fmt.Sprintf("GarageCluster %s/%s", cluster.Namespace, cluster.Name)
+	if cluster != nil {
+		namespace, name := cluster.Namespace, cluster.Name
+		if ref := cluster.Spec.ConnectTo; ref != nil && ref.ClusterRef != nil {
+			name = ref.ClusterRef.Name
+			if ref.ClusterRef.Namespace != "" {
+				namespace = ref.ClusterRef.Namespace
+			}
+		}
+		owner = fmt.Sprintf("GarageCluster %s/%s", namespace, name)
 	}
-	return fmt.Errorf("waiting for the operator Admin token of %s; see its %s condition for the blocking Pod: %w",
-		owner, garagev1beta1.ConditionOperatorAdminTokenReady, err)
+	detail := ""
+	var podSetErr *operatorAdminPodSetError
+	if stderrors.As(err, &podSetErr) {
+		detail = " for the blocking Pod"
+	}
+	return fmt.Errorf("waiting for the operator Admin token of %s; see its %s condition%s: %w",
+		owner, garagev1beta1.ConditionOperatorAdminTokenReady, detail, err)
 }
 
 func getReadyOperatorAdminToken(
@@ -658,7 +667,7 @@ func (r *GarageClusterReconciler) reconcileOperatorAdminToken(
 	}
 	podSet, err := getOperatorAdminPodSet(ctx, r.safetyReader(), cluster)
 	if err != nil {
-		return fmt.Errorf("proving complete managed process set for dynamic operator token: %w", &operatorAdminPodSetError{err: err})
+		return fmt.Errorf("proving complete managed process set for dynamic operator token: %w", err)
 	}
 	bootstrap, err := r.staticGarageClientForPod(ctx, &podSet.Pods[0], getAdminPort(cluster))
 	if err != nil {
