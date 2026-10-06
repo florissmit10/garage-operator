@@ -54,6 +54,22 @@ func garagePodReady(pod *corev1.Pod) bool {
 	return false
 }
 
+// garagePodNotReadyReason describes why garagePodReady rejected pod.
+func garagePodNotReadyReason(pod *corev1.Pod) string {
+	switch {
+	case !pod.DeletionTimestamp.IsZero():
+		return "terminating"
+	case pod.Status.Phase == "":
+		return "phase not reported yet"
+	case pod.Status.Phase != corev1.PodRunning:
+		return fmt.Sprintf("phase is %s, not Running", pod.Status.Phase)
+	case pod.Status.PodIP == "":
+		return "no Pod IP assigned"
+	default:
+		return "Ready condition is not True"
+	}
+}
+
 func garageNodeReferencesCluster(node *garagev1beta1.GarageNode, cluster *garagev1beta2.GarageCluster) bool {
 	if node == nil || cluster == nil || node.Spec.ClusterRef.Name != cluster.Name {
 		return false
@@ -67,7 +83,7 @@ func garageNodeReferencesCluster(node *garagev1beta1.GarageNode, cluster *garage
 
 func operatorAdminPodRecord(pod *corev1.Pod, nodeID string) (string, error) {
 	if !garagePodReady(pod) {
-		return "", fmt.Errorf("managed Pod %s/%s is not nonterminating, Running, addressed, and Ready", pod.Namespace, pod.Name)
+		return "", fmt.Errorf("managed Pod %s/%s is not Ready: %s", pod.Namespace, pod.Name, garagePodNotReadyReason(pod))
 	}
 	owner := metav1.GetControllerOf(pod)
 	if owner == nil || owner.UID == "" {

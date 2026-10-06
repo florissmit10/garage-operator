@@ -669,6 +669,7 @@ On failure, `succeeded: false` and `error` contains the message. The annotation 
 | `RemoteClustersHealthy` | False when a federated remote is unreachable > 1h (short blips ignored) | if a zone is permanently gone, reduce `replication.factor` |
 | `FederationConfigured` | False when `spec.remoteClusters` is set but no `rpc_public_addr`/`publicEndpoint` (HelloMessage advertises the unroutable pod IP) | set `spec.network.rpcPublicAddr` or a `publicEndpoint` (also a webhook admission warning) |
 | `PeerUnreachable` | True when a peer has been continuously down (`is_up:false`) beyond ~10m — surfaced in `status.unreachablePeers`. Detection is duration-based via `lastSeenSecsAgo` (the admin API can't read Garage's internal `Abandoned` state). | the operator's periodic `ConnectClusterNodes` nudge is the recovery path (esp. for single-link edge gateways) |
+| `OperatorAdminTokenReady` | False when the dynamic operator Admin token is not proven on the complete managed Pod set (`reconcileOperatorAdminToken`); reason `ManagedPodsNotReady` names the missing/unready Pod or GarageNode. Once the token is authoritative this blocks GarageKey/GarageBucket even with quorum (#472). Reporting only — the fail-closed proof is unchanged. | bring the named Pod back to Ready, or remove its GarageNode/pool member |
 
 Validation notes: on the tested Garage v2.3.0, a roleless gateway has no locally
 replicated key record and S3 authentication returns `403 Forbidden: No such

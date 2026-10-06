@@ -726,11 +726,11 @@ func (r *GarageClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// GarageNode/Pod is an initializing topology member rather than a persisted
 	// replacement actor: without this boundary the node cannot publish its first
 	// observedPodUid, while rollout readiness waits for exactly that status.
-	operatorAdminTokenReady := false
-	if err := r.reconcileOperatorAdminToken(ctx, cluster); err != nil {
-		log.V(1).Info("Operator dynamic Admin token is not ready on the desired managed Pod set", "error", err)
+	operatorAdminTokenErr := r.reconcileOperatorAdminToken(ctx, cluster)
+	if operatorAdminTokenErr != nil {
+		log.V(1).Info("Operator dynamic Admin token is not ready on the desired managed Pod set", "error", operatorAdminTokenErr)
 	} else {
-		operatorAdminTokenReady = true
+		r.reportOperatorAdminTokenCondition(ctx, cluster, nil)
 	}
 
 	// Every GarageNode StatefulSet and node-local-pool DaemonSet is OnDelete. Drive one
@@ -746,6 +746,10 @@ func (r *GarageClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return r.updateStatus(ctx, cluster, PhaseFailed, fmt.Errorf("reconciling storage rollout: %w", err))
 	}
 	if !rolloutComplete {
+		// Both early returns below skip the token retry further down.
+		if operatorAdminTokenErr != nil {
+			r.reportOperatorAdminTokenCondition(ctx, cluster, operatorAdminTokenErr)
+		}
 		if cluster.Status.StorageRollout != nil {
 			// ensureNodeLocalPoolRolloutExclusion already persisted the exact actor and
 			// RollingOut condition atomically. Do not run bootstrap, federation, or
@@ -822,10 +826,12 @@ func (r *GarageClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// table-backed full-scope token for operator control. Failure is reported and
 	// retried, but does not prevent the static bootstrap token from continuing to
 	// form/connect the cluster on this pass.
-	if !operatorAdminTokenReady {
-		if err := r.reconcileOperatorAdminToken(ctx, cluster); err != nil {
-			log.Error(err, "Operator dynamic Admin token is not ready yet")
+	if operatorAdminTokenErr != nil {
+		operatorAdminTokenErr = r.reconcileOperatorAdminToken(ctx, cluster)
+		if operatorAdminTokenErr != nil {
+			log.Error(operatorAdminTokenErr, "Operator dynamic Admin token is not ready yet")
 		}
+		r.reportOperatorAdminTokenCondition(ctx, cluster, operatorAdminTokenErr)
 	}
 	if err := r.reconcileOperatorMetricsToken(ctx, cluster); err != nil {
 		log.Error(err, "Operator dynamic metrics token is not ready yet")
