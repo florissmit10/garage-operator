@@ -28,6 +28,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	garagev1beta2 "github.com/rajsinghtech/garage-operator/api/v1beta2"
 	"github.com/rajsinghtech/garage-operator/internal/garage"
@@ -93,11 +94,11 @@ func TestObserveBlockResyncStatusAggregatesNodes(t *testing.T) {
 	status := &garagev1beta2.GarageClusterStatus{}
 	observeBlockResyncStatus(context.Background(), client, status, now)
 
-	if status.ResyncQueueLength != 1350 {
-		t.Fatalf("ResyncQueueLength = %d, want 1350", status.ResyncQueueLength)
+	if status.ResyncQueueLength == nil || *status.ResyncQueueLength != 1350 {
+		t.Fatalf("ResyncQueueLength = %v, want 1350", status.ResyncQueueLength)
 	}
-	if status.BlockErrors != 2 {
-		t.Fatalf("BlockErrors = %d, want 2 distinct blocks", status.BlockErrors)
+	if status.BlockErrors == nil || *status.BlockErrors != 2 {
+		t.Fatalf("BlockErrors = %v, want 2 distinct blocks", status.BlockErrors)
 	}
 	details := status.BlockErrorDetails
 	if details == nil || details.Count != 2 || len(details.TopErrors) != 2 {
@@ -166,8 +167,8 @@ func TestObserveBlockResyncStatusClearsUnobservedFields(t *testing.T) {
 	t.Parallel()
 	lastErrorAt := metav1.NewTime(time.Date(2026, time.October, 6, 11, 0, 0, 0, time.UTC))
 	previous := garagev1beta2.GarageClusterStatus{
-		ResyncQueueLength: 42,
-		BlockErrors:       1,
+		ResyncQueueLength: ptr.To[int64](42),
+		BlockErrors:       ptr.To[int32](1),
 		BlockErrorDetails: &garagev1beta2.BlockErrorsStatus{
 			Count: 1, LastErrorAt: &lastErrorAt,
 			TopErrors: []garagev1beta2.BlockErrorDetail{{BlockHash: resyncStatusHashA, ErrorCount: 2}},
@@ -184,7 +185,7 @@ func TestObserveBlockResyncStatusClearsUnobservedFields(t *testing.T) {
 	} {
 		status := previous.DeepCopy()
 		observeBlockResyncStatus(context.Background(), client, status, time.Now())
-		if status.ResyncQueueLength != 0 || status.BlockErrors != 0 || status.BlockErrorDetails != nil {
+		if status.ResyncQueueLength != nil || status.BlockErrors != nil || status.BlockErrorDetails != nil {
 			t.Fatalf("%s: unobserved fields were not cleared: %+v", name, status)
 		}
 	}
@@ -193,8 +194,8 @@ func TestObserveBlockResyncStatusClearsUnobservedFields(t *testing.T) {
 func TestObserveBlockResyncStatusClearsResolvedErrors(t *testing.T) {
 	t.Parallel()
 	status := &garagev1beta2.GarageClusterStatus{
-		ResyncQueueLength: 42,
-		BlockErrors:       1,
+		ResyncQueueLength: ptr.To[int64](42),
+		BlockErrors:       ptr.To[int32](1),
 		BlockErrorDetails: &garagev1beta2.BlockErrorsStatus{Count: 1},
 	}
 	client := newResyncStatusAdmin(t,
@@ -203,8 +204,9 @@ func TestObserveBlockResyncStatusClearsResolvedErrors(t *testing.T) {
 
 	observeBlockResyncStatus(context.Background(), client, status, time.Now())
 
-	if status.ResyncQueueLength != 0 || status.BlockErrors != 0 || status.BlockErrorDetails != nil {
-		t.Fatalf("drained cluster kept stale resync status: %+v", status)
+	if status.ResyncQueueLength == nil || *status.ResyncQueueLength != 0 ||
+		status.BlockErrors == nil || *status.BlockErrors != 0 || status.BlockErrorDetails != nil {
+		t.Fatalf("drained cluster must report observed zeros: %+v", status)
 	}
 }
 
@@ -219,8 +221,8 @@ func TestApplyBlockErrorStatusBoundsTopErrors(t *testing.T) {
 		Success: map[string][]garage.BlockError{"storage-a": nodeErrors},
 	}, time.Now())
 
-	if status.BlockErrors != maximumReportedBlockErrors+8 || len(status.BlockErrorDetails.TopErrors) != maximumReportedBlockErrors {
-		t.Fatalf("count=%d topErrors=%d", status.BlockErrors, len(status.BlockErrorDetails.TopErrors))
+	if *status.BlockErrors != maximumReportedBlockErrors+8 || len(status.BlockErrorDetails.TopErrors) != maximumReportedBlockErrors {
+		t.Fatalf("count=%d topErrors=%d", *status.BlockErrors, len(status.BlockErrorDetails.TopErrors))
 	}
 	if status.BlockErrorDetails.TopErrors[0].ErrorCount != maximumReportedBlockErrors+7 {
 		t.Fatalf("top errors not ordered worst-first: %+v", status.BlockErrorDetails.TopErrors[0])

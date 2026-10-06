@@ -679,12 +679,12 @@ func TestNodeLocalPoolProjectedSafetyStatusBudget(t *testing.T) {
 			CurrentVersion: int64(^uint64(0) >> 1), MinAck: int64(^uint64(0) >> 1),
 			Versions: make([]garagev1beta2.LayoutVersionInfo, 0, maximumReportedLayoutHistoryVersions),
 		},
-		BlockErrors: maximumPositiveCapacityRoles,
+		BlockErrors: ptr.To[int32](maximumPositiveCapacityRoles),
 		BlockErrorDetails: &garagev1beta2.BlockErrorsStatus{
 			Count: maximumPositiveCapacityRoles, LastErrorAt: &observedAt,
 			TopErrors: make([]garagev1beta2.BlockErrorDetail, 0, maximumReportedBlockErrors),
 		},
-		ResyncQueueLength: int64(^uint64(0) >> 1), StorageDrain: drain,
+		ResyncQueueLength: ptr.To(int64(^uint64(0) >> 1)), StorageDrain: drain,
 		ScrubStatus: &garagev1beta2.ScrubStatus{
 			Running: true, Paused: true, Progress: strings.Repeat("p", 256),
 			TranquilityLevel: 100, LastCompleted: &observedAt, NextRun: &observedAt,

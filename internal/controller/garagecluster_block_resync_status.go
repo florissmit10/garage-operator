@@ -23,6 +23,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	garagev1beta2 "github.com/rajsinghtech/garage-operator/api/v1beta2"
@@ -40,9 +41,9 @@ const (
 )
 
 // observeBlockResyncStatus refreshes ResyncQueueLength and the block-error
-// fields from every node Garage can address. A field is cleared unless every
-// node answered: a sum that skips a down node holding the backlog must not
-// look drained.
+// fields from every node Garage can address. A field is left unobserved (nil)
+// unless every node answered: a sum that skips a down node holding the
+// backlog must not look drained.
 func observeBlockResyncStatus(
 	ctx context.Context,
 	garageClient *garage.Client,
@@ -55,11 +56,11 @@ func observeBlockResyncStatus(
 	switch {
 	case err != nil:
 		log.V(1).Info("Failed to list Garage workers for resync status", "error", err)
-		status.ResyncQueueLength = 0
+		status.ResyncQueueLength = nil
 	case logPartialNodeErrors(ctx, "ListWorkers", workers.Error):
-		status.ResyncQueueLength = 0
+		status.ResyncQueueLength = nil
 	default:
-		status.ResyncQueueLength = resyncQueueLength(workers)
+		status.ResyncQueueLength = ptr.To(resyncQueueLength(workers))
 	}
 
 	blockErrors, err := garageClient.ListBlockErrors(ctx, "*")
@@ -75,12 +76,12 @@ func observeBlockResyncStatus(
 }
 
 func clearBlockResyncStatus(status *garagev1beta2.GarageClusterStatus) {
-	status.ResyncQueueLength = 0
+	status.ResyncQueueLength = nil
 	clearBlockErrorStatus(status)
 }
 
 func clearBlockErrorStatus(status *garagev1beta2.GarageClusterStatus) {
-	status.BlockErrors = 0
+	status.BlockErrors = nil
 	status.BlockErrorDetails = nil
 }
 
@@ -127,7 +128,8 @@ func applyBlockErrorStatus(status *garagev1beta2.GarageClusterStatus, resp *gara
 		}
 	}
 	if len(byHash) == 0 {
-		clearBlockErrorStatus(status)
+		status.BlockErrors = ptr.To[int32](0)
+		status.BlockErrorDetails = nil
 		return
 	}
 
@@ -172,7 +174,7 @@ func applyBlockErrorStatus(status *garagev1beta2.GarageClusterStatus, resp *gara
 			NextRetry:   nextRetry,
 		})
 	}
-	status.BlockErrors = count
+	status.BlockErrors = ptr.To(count)
 	status.BlockErrorDetails = details
 }
 

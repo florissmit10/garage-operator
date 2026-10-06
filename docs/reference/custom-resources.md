@@ -279,6 +279,11 @@ before removing or changing it.
 | `pendingGatewayTombstones`, `gatewayNodesNotInLayout`, `unreachablePeers`, `layoutDiagnosis` | Actionable gateway/layout degradation and peer reachability |
 | `lastOperation`, `observedGeneration`, `conditions` | Last annotation result, reconciliation generation, and health gates |
 
+`resyncQueueLength` and `blockErrors` are absent when the operator could not
+observe them on this pass (Admin API unreachable or some node did not answer).
+`0` means every node answered: the resync queue is drained, or no block has a
+sync error.
+
 The currently written cluster conditions include `Ready`,
 `PublicEndpointReady`, `ManagementHandleReady`, `GatewayConnected`,
 `GatewayLayoutDegraded`, `GatewayTombstones`, `QuorumAtRisk`,
