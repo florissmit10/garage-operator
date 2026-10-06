@@ -123,10 +123,22 @@ func validateManagedAdminTokenInfo(info *garage.AdminTokenInfo, id, name string,
 // static bootstrap credential it already uses before a dynamic token exists.
 var errAdminTokenUnproven = stderrors.New("dynamic operator Admin token is intact but unproven on the live Pod incarnation set")
 
+// eventReasonOperatorAdminTokenNotReady carries the raw token error that the
+// condition message deliberately leaves out.
+const eventReasonOperatorAdminTokenNotReady = "OperatorAdminTokenNotReady"
+
 // operatorAdminTokenCondition maps the outcome of reconcileOperatorAdminToken
 // to ConditionOperatorAdminTokenReady. authoritative reports whether the
 // dynamic token already gates the shared Admin client: before that, a failure
 // does not block dependents because they still use the static credential.
+//
+// The message must be a pure function of the blocking cause, never of raw
+// error text: network errors carry ephemeral ports, timings, and request IDs,
+// and any change rewrites status and re-triggers the GarageCluster watch. Only
+// ManagedPodsNotReady includes detail, because that detail is the Kubernetes
+// object state the operator derived it from (the blocking Pod/GarageNode name
+// and why it is not Ready). The raw error goes to the operator log and, when
+// the condition changes, to a Warning event on the GarageCluster.
 func operatorAdminTokenCondition(tokenErr error, authoritative bool) metav1.Condition {
 	condition := metav1.Condition{Type: garagev1beta1.ConditionOperatorAdminTokenReady}
 	if tokenErr == nil && authoritative {
@@ -140,6 +152,8 @@ func operatorAdminTokenCondition(tokenErr error, authoritative bool) metav1.Cond
 	if !authoritative {
 		effect = "GarageKey and GarageBucket reconciliation continues on the static bootstrap token meanwhile"
 	}
+	const seeEvents = "; see the " + eventReasonOperatorAdminTokenNotReady +
+		" events on this GarageCluster or the operator log for the underlying error"
 	var podSetErr *operatorAdminPodSetError
 	switch {
 	case tokenErr == nil:
@@ -151,17 +165,52 @@ func operatorAdminTokenCondition(tokenErr error, authoritative bool) metav1.Cond
 		condition.Reason = garagev1beta1.ReasonOperatorAdminTokenManagedPodsNotReady
 		condition.Message = fmt.Sprintf(
 			"dynamic operator Admin token needs every managed Garage Pod Ready (%s): %v", effect, podSetErr)
+	case authoritative && stderrors.Is(tokenErr, errAdminTokenUnproven):
+		condition.Reason = garagev1beta1.ReasonOperatorAdminTokenNotVerified
+		condition.Message = fmt.Sprintf(
+			"dynamic operator Admin token is intact but not yet accepted by every managed Garage process (%s)%s", effect, seeEvents)
 	case authoritative:
 		condition.Reason = garagev1beta1.ReasonOperatorAdminTokenNotVerified
 		condition.Message = fmt.Sprintf(
-			"dynamic operator Admin token is not verified on every managed Garage process (%s): %v", effect, tokenErr)
+			"dynamic operator Admin token could not be verified on every managed Garage process (%s)%s", effect, seeEvents)
 	default:
 		condition.Reason = garagev1beta1.ReasonOperatorAdminTokenProvisioning
 		condition.Message = fmt.Sprintf(
-			"dynamic operator Admin token is not provisioned yet (%s): %v", effect, tokenErr)
+			"dynamic operator Admin token is not provisioned yet (%s)%s", effect, seeEvents)
 	}
 	condition.Message = limitStatusConditionMessage(condition.Message)
 	return condition
+}
+
+// operatorAdminTokenAuthoritative reports whether the dynamic token Secret
+// carries its ready marker. The cached read is enough except right after
+// reconcileOperatorAdminToken succeeded: that path may have just created the
+// Secret or patched the marker to ready, which the informer may not show yet.
+// Only then is the uncached read needed. The failure paths never set the
+// marker, so a stale cache there can at worst show NotVerified instead of
+// Provisioning for one pass after a token-recovery delete, and the Secret
+// watch corrects it.
+func (r *GarageClusterReconciler) operatorAdminTokenAuthoritative(
+	ctx context.Context,
+	cluster *garagev1beta2.GarageCluster,
+	tokenErr error,
+) (bool, error) {
+	key := types.NamespacedName{Name: operatorAdminTokenSecretName(cluster), Namespace: cluster.Namespace}
+	read := func(reader client.Reader) (bool, error) {
+		secret := &corev1.Secret{}
+		if err := reader.Get(ctx, key, secret); err != nil {
+			if errors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		return secret.Annotations[annotationOperatorAdminTokenReady] == operatorAdminTokenReadyValue, nil
+	}
+	ready, err := read(r.Client)
+	if err != nil || ready || tokenErr != nil {
+		return ready, err
+	}
+	return read(r.safetyReader())
 }
 
 // setOperatorAdminTokenCondition records the outcome of the last
@@ -185,13 +234,8 @@ func (r *GarageClusterReconciler) setOperatorAdminTokenCondition(
 		apply()
 		return UpdateStatusWithRetry(ctx, r.Client, cluster, apply)
 	}
-	// Uncached: the success path has just patched the ready marker.
-	authoritative := false
-	secret := &corev1.Secret{}
-	key := types.NamespacedName{Name: operatorAdminTokenSecretName(cluster), Namespace: cluster.Namespace}
-	if err := r.safetyReader().Get(ctx, key, secret); err == nil {
-		authoritative = secret.Annotations[annotationOperatorAdminTokenReady] == operatorAdminTokenReadyValue
-	} else if !errors.IsNotFound(err) {
+	authoritative, err := r.operatorAdminTokenAuthoritative(ctx, cluster, tokenErr)
+	if err != nil {
 		return err
 	}
 	condition := operatorAdminTokenCondition(tokenErr, authoritative)
@@ -202,7 +246,16 @@ func (r *GarageClusterReconciler) setOperatorAdminTokenCondition(
 	}
 	apply := func() { meta.SetStatusCondition(&cluster.Status.Conditions, condition) }
 	apply()
-	return UpdateStatusWithRetry(ctx, r.Client, cluster, apply)
+	if err := UpdateStatusWithRetry(ctx, r.Client, cluster, apply); err != nil {
+		return err
+	}
+	// Events are emitted only when the condition changes, so they stay bounded
+	// while still recording the error that caused the change.
+	if tokenErr != nil {
+		emitLayoutEvent(r.EventRecorder, cluster, corev1.EventTypeWarning, eventReasonOperatorAdminTokenNotReady,
+			"%s: %s", condition.Reason, limitStatusConditionMessage(tokenErr.Error()))
+	}
+	return nil
 }
 
 // reportOperatorAdminTokenCondition is the non-fatal Reconcile wrapper: the
