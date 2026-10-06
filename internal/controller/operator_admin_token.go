@@ -134,7 +134,8 @@ const eventReasonOperatorAdminTokenNotReady = "OperatorAdminTokenNotReady"
 //
 // The message must be a pure function of the blocking cause, never of raw
 // error text: network errors carry ephemeral ports, timings, and request IDs,
-// and any change rewrites status and re-triggers the GarageCluster watch. Only
+// and any change would cost a status write on every pass (and a watch event for
+// every GarageCluster watcher). Only
 // ManagedPodsNotReady includes detail, because that detail is the Kubernetes
 // object state the operator derived it from (the blocking Pod/GarageNode name
 // and why it is not Ready). The raw error goes to the operator log and, when

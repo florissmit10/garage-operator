@@ -751,8 +751,8 @@ only errors tagged `operatorAdminPodSetError` in `operator_admin_token_pods.go`)
 still use the static token). Once authoritative, False blocks GarageKey and
 GarageBucket even with quorum; the lever is getting the named Pod Ready.
 Reporting only — the proof is unchanged. Messages are fixed per cause and
-never embed raw error text (ports, request IDs, timings would rewrite status
-every pass and re-trigger the `For()` watch); the raw error goes to the log and
+never embed raw error text (ports, request IDs, timings would cost a status
+write every pass); the raw error goes to the log and
 to an `OperatorAdminTokenNotReady` Warning event emitted only when the
 condition changes. One Reconcile writes the condition at most once, pinned by
 `TestReconcileWritesOperatorAdminTokenConditionAtMostOncePerLoop`.
